@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
     private val inputUpdateIntervalMs = 20L
     private val inputHandler = Handler(Looper.getMainLooper())
     private var latestAxes = FloatArray(4) { 0f }
-    private val buttonStates = mutableStateMapOf<Int, Boolean>() // Composeの再描画をトリガーするために mutableStateMapOf を使用
+    private val buttonStates = mutableStateMapOf<Int, Boolean>()
 
     private val serialSendIntervalMs = 50L
     private var serialSendExecutor: ScheduledExecutorService? = null
@@ -64,7 +64,6 @@ class MainActivity : ComponentActivity() {
     private var readHandler: Handler? = null
     private val serialBuffer = StringBuilder()
 
-    // カスタムキーコードの定義
     companion object {
         const val KEYCODE_CUSTOM_CROSS = 96
         const val KEYCODE_CUSTOM_CIRCLE = 97
@@ -82,11 +81,17 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
             val action = intent.action
-            // Log.d("USBReceiver", "Received action: $action")
+
+            val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
+
             when (action) {
                 ACTION_USB_PERMISSION -> {
                     synchronized(this) {
-                        val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                         if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                             device?.let {
                                 statusMessage.value = "USB権限許可: ${it.deviceName}"
@@ -100,7 +105,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     device?.let {
                         statusMessage.value = "USBデバイス接続: ${it.productName ?: it.deviceName}"
                         Log.i("USBReceiver", "USB device attached: ${it.deviceName}")
@@ -112,7 +116,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     device?.let {
                         statusMessage.value = "USBデバイス切断: ${it.productName ?: it.deviceName}"
                         Log.i("USBReceiver", "USB device detached: ${it.deviceName}")
@@ -149,7 +152,7 @@ class MainActivity : ComponentActivity() {
                         sentData = sentDataForUi.value,
                         receivedData = receivedData.value,
                         axes = latestAxes,
-                        buttonStates = buttonStates // mutableStateMapOf を渡す
+                        buttonStates = buttonStates
                     )
                 }
             }
@@ -198,11 +201,17 @@ class MainActivity : ComponentActivity() {
     private fun requestUsbPermission(device: UsbDevice) {
         Log.d("USBRequest", "Requesting permission for ${device.deviceName}")
         val intentFlags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent(ACTION_USB_PERMISSION), intentFlags)
+
+        // 【修正済み】Intentを明示的にする
+        val intent = Intent(ACTION_USB_PERMISSION).apply {
+            `package` = this@MainActivity.packageName
+        }
+
+        val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, intentFlags)
         usbManager!!.requestPermission(device, permissionIntent)
     }
 
@@ -303,11 +312,9 @@ class MainActivity : ComponentActivity() {
         return super.onGenericMotionEvent(event)
     }
 
-    // 汎用的なボタン状態更新（Dpadと通常のボタン両方で使えるように）
     private fun updateButtonState(keyCode: Int, newState: Boolean) {
         if (buttonStates[keyCode] != newState) {
             buttonStates[keyCode] = newState
-            // Log.d("ButtonStateUpdate", "KeyCode: $keyCode, NewState: $newState, Name: ${KeyEvent.keyCodeToString(keyCode)}")
         }
     }
 
@@ -334,10 +341,10 @@ class MainActivity : ComponentActivity() {
             override fun run() {
                 val axesStr = "n:" + latestAxes.joinToString(":") { "%.2f".format(it) }
                 val buttonNames = mapOf(
-                    KEYCODE_CUSTOM_CIRCLE to "cr",    // 97
-                    KEYCODE_CUSTOM_CROSS to "ci",     // 96
-                    KEYCODE_CUSTOM_TRIANGLE to "tri", // 100
-                    KEYCODE_CUSTOM_SQUARE to "sq",    // 99
+                    KEYCODE_CUSTOM_CROSS to "|cr",
+                    KEYCODE_CUSTOM_CIRCLE to "ci",
+                    KEYCODE_CUSTOM_TRIANGLE to "tri",
+                    KEYCODE_CUSTOM_SQUARE to "sq",
                     KeyEvent.KEYCODE_BUTTON_L1 to "L1",
                     KeyEvent.KEYCODE_BUTTON_R1 to "R1",
                     KeyEvent.KEYCODE_BUTTON_L2 to "L2",
@@ -355,7 +362,7 @@ class MainActivity : ComponentActivity() {
                 val btnStr = buttonNames.entries.joinToString("|") { (keyCode, label) ->
                     if (buttonStates[keyCode] == true) "$label:p" else "$label:no_p"
                 }
-                val currentData = "|$axesStr|$btnStr|"
+                val currentData = "|$axesStr|\n$btnStr|"
                 queueSerialData(currentData)
                 inputHandler.postDelayed(this, inputUpdateIntervalMs)
             }
@@ -397,7 +404,6 @@ class MainActivity : ComponentActivity() {
                             Handler(Looper.getMainLooper()).post {
                                 receivedData.value = line
                             }
-                            // Log.d("SerialRead", "Received Line: $line")
                             serialBuffer.delete(0, line.length + 1)
                         }
                     }
@@ -416,8 +422,6 @@ class MainActivity : ComponentActivity() {
 }
 
 // --- Composable UI Functions ---
-// (MainActivityクラスの外に配置するか、別のファイルに定義)
-
 @Composable
 fun ControllerScreen(
     modifier: Modifier = Modifier,
@@ -425,7 +429,7 @@ fun ControllerScreen(
     sentData: String,
     receivedData: String,
     axes: FloatArray,
-    buttonStates: Map<Int, Boolean> // SnapshotStateMap を受け取る
+    buttonStates: Map<Int, Boolean>
 ) {
     Column(
         modifier = modifier
@@ -442,9 +446,9 @@ fun ControllerScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(IntrinsicSize.Min), // 子要素の高さに合わせる
+                .height(IntrinsicSize.Min),
             horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.Top // 上揃えに変更
+            verticalAlignment = Alignment.Top
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                 AnalogStickView(x = axes[0], y = axes[1], label = "左スティック")
@@ -452,13 +456,13 @@ fun ControllerScreen(
                 DpadView(buttonStates = buttonStates)
             }
 
-            Spacer(Modifier.width(16.dp)) // 中央のスペース
+            Spacer(Modifier.width(16.dp))
 
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                 ControllerButtonsView(buttonStates = buttonStates)
             }
 
-            Spacer(Modifier.width(16.dp)) // 中央のスペース
+            Spacer(Modifier.width(16.dp))
 
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                 AnalogStickView(x = axes[2], y = axes[3], label = "右スティック")
@@ -467,7 +471,7 @@ fun ControllerScreen(
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f)) // 残りのスペースを埋める
+        Spacer(modifier = Modifier.weight(1f))
 
         Column(modifier = Modifier.fillMaxWidth()) {
             Text("送信データ (UI):", style = MaterialTheme.typography.titleSmall)
@@ -494,9 +498,8 @@ fun AnalogStickView(x: Float, y: Float, label: String, size: Dp = 80.dp) {
                 .border(1.dp, MaterialTheme.colorScheme.onSurfaceVariant, CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            val stickRadiusRatio = 0.25f // スティックの半径の、外円に対する割合
+            val stickRadiusRatio = 0.25f
             val stickDiameter = size * stickRadiusRatio * 2
-            // スティックの可動範囲を計算 (外円の半径 - スティックの半径)
             val movementRadius = (size / 2) - (stickDiameter / 2)
 
             Box(
@@ -515,7 +518,7 @@ fun AnalogStickView(x: Float, y: Float, label: String, size: Dp = 80.dp) {
 @Composable
 fun DpadView(buttonStates: Map<Int, Boolean>) {
     val buttonSize = 30.dp
-    val containerSize = buttonSize * 3 // Dpad全体のコンテナサイズ
+    val containerSize = buttonSize * 3
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("十字キー", style = MaterialTheme.typography.bodySmall)
@@ -560,7 +563,7 @@ fun ControllerButtonsView(buttonStates: Map<Int, Boolean>) {
                 isPressed = buttonStates[KeyEvent.KEYCODE_BUTTON_L1] == true,
                 label = "L1", modifier = Modifier.width(55.dp).height(buttonSize * 0.7f)
             )
-            Spacer(Modifier.width(buttonSize + spacing * 3)) // L1とR1の間隔
+            Spacer(Modifier.width(buttonSize + spacing * 3))
             ButtonShape(
                 isPressed = buttonStates[KeyEvent.KEYCODE_BUTTON_R1] == true,
                 label = "R1", modifier = Modifier.width(55.dp).height(buttonSize * 0.7f)
@@ -568,28 +571,28 @@ fun ControllerButtonsView(buttonStates: Map<Int, Boolean>) {
         }
 
         Box(modifier = Modifier.size(buttonSize * 2 + spacing * 2.5f)) {
-            ButtonShape( // △ (Triangle)
+            ButtonShape(
                 isPressed = buttonStates[MainActivity.KEYCODE_CUSTOM_TRIANGLE] == true,
                 label = "△", shape = CircleShape,
-                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_TRIANGLE] == true) Color(0xFF4CAF50) else Color(0xFFA5D6A7), // Green
+                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_TRIANGLE] == true) Color(0xFF4CAF50) else Color(0xFFA5D6A7),
                 modifier = Modifier.align(Alignment.TopCenter).size(buttonSize)
             )
-            ButtonShape( // □ (Square)
+            ButtonShape(
                 isPressed = buttonStates[MainActivity.KEYCODE_CUSTOM_SQUARE] == true,
                 label = "□", shape = CircleShape,
-                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_SQUARE] == true) Color(0xFFFF9800) else Color(0xFFFFCC80), // Orange
+                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_SQUARE] == true) Color(0xFFFF9800) else Color(0xFFFFCC80),
                 modifier = Modifier.align(Alignment.CenterStart).size(buttonSize)
             )
-            ButtonShape( // ○ (Circle)
+            ButtonShape(
                 isPressed = buttonStates[MainActivity.KEYCODE_CUSTOM_CIRCLE] == true,
                 label = "○", shape = CircleShape,
-                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_CIRCLE] == true) Color(0xFFF44336) else Color(0xFFEF9A9A), // Red
+                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_CIRCLE] == true) Color(0xFFF44336) else Color(0xFFEF9A9A),
                 modifier = Modifier.align(Alignment.CenterEnd).size(buttonSize)
             )
-            ButtonShape( // ✕ (Cross)
+            ButtonShape(
                 isPressed = buttonStates[MainActivity.KEYCODE_CUSTOM_CROSS] == true,
                 label = "✕", shape = CircleShape,
-                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_CROSS] == true) Color(0xFF2196F3) else Color(0xFF90CAF9), // Blue
+                colorOverride = if (buttonStates[MainActivity.KEYCODE_CUSTOM_CROSS] == true) Color(0xFF2196F3) else Color(0xFF90CAF9),
                 modifier = Modifier.align(Alignment.BottomCenter).size(buttonSize)
             )
         }
@@ -598,7 +601,7 @@ fun ControllerButtonsView(buttonStates: Map<Int, Boolean>) {
                 isPressed = buttonStates[KeyEvent.KEYCODE_BUTTON_L2] == true,
                 label = "L2", modifier = Modifier.width(55.dp).height(buttonSize * 0.7f)
             )
-            Spacer(Modifier.width(buttonSize + spacing * 3)) // L2とR2の間隔
+            Spacer(Modifier.width(buttonSize + spacing * 3))
             ButtonShape(
                 isPressed = buttonStates[KeyEvent.KEYCODE_BUTTON_R2] == true,
                 label = "R2", modifier = Modifier.width(55.dp).height(buttonSize * 0.7f)
@@ -644,15 +647,14 @@ fun ButtonShape(
     label: String,
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(8.dp),
-    colorOverride: Color? = null // 特定の色を強制する場合
+    colorOverride: Color? = null
 ) {
     val baseColor = colorOverride ?: if (isPressed) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer
-    val contentColor = if (colorOverride != null) { // 固定色が指定された場合、押下状態で明暗を調整
+    val contentColor = if (colorOverride != null) {
         if (isPressed) Color.White else Color.Black.copy(alpha = 0.7f)
     } else {
         if (isPressed) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
     }
-
 
     Box(
         modifier = modifier
