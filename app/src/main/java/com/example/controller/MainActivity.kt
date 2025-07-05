@@ -47,7 +47,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var sentDataForUi: MutableState<String>
     private lateinit var receivedData: MutableState<String>
 
-    private val ACTION_USB_PERMISSION = "com.example.controller.USB_PERMISSION"
     private var usbManager: UsbManager? = null
     private var usbSerialPort: UsbSerialPort? = null
 
@@ -65,6 +64,9 @@ class MainActivity : ComponentActivity() {
     private val serialBuffer = StringBuilder()
 
     companion object {
+        const val ACTION_USB_PERMISSION = "com.example.controller.USB_PERMISSION"
+        const val ACTION_USB_PERMISSION_GRANTED = "com.example.controller.USB_PERMISSION_GRANTED"
+
         const val KEYCODE_CUSTOM_CROSS = 96
         const val KEYCODE_CUSTOM_CIRCLE = 97
         const val KEYCODE_CUSTOM_SQUARE = 99
@@ -77,51 +79,20 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private val usbReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent == null) return
-            val action = intent.action
-
-            val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-            }
-
-            when (action) {
-                ACTION_USB_PERMISSION -> {
-                    synchronized(this) {
-                        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                            device?.let {
-                                statusMessage.value = "USB権限許可: ${it.deviceName}"
-                                Log.i("USBReceiver", "Permission granted for ${it.deviceName}")
-                                openUsbDevice(it)
-                            }
-                        } else {
-                            statusMessage.value = "USB権限が拒否されました"
-                            Log.w("USBReceiver", "USB permission denied for device ${device?.deviceName}")
-                        }
-                    }
+    // デバイス切断を検知するためのレシーバー
+    private val usbDetachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) {
+                val device: UsbDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    device?.let {
-                        statusMessage.value = "USBデバイス接続: ${it.productName ?: it.deviceName}"
-                        Log.i("USBReceiver", "USB device attached: ${it.deviceName}")
-                        if (usbManager?.hasPermission(it) == false) {
-                            requestUsbPermission(it)
-                        } else if (usbManager?.hasPermission(it) == true) {
-                            openUsbDevice(it)
-                        }
-                    }
-                }
-                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    device?.let {
-                        statusMessage.value = "USBデバイス切断: ${it.productName ?: it.deviceName}"
-                        Log.i("USBReceiver", "USB device detached: ${it.deviceName}")
-                        if (usbSerialPort?.device?.deviceId == it.deviceId) {
-                            closeUsbPort()
-                        }
+                device?.let {
+                    if (usbSerialPort?.device?.deviceId == it.deviceId) {
+                        Log.i("MainActivity", "USB device detached: ${it.deviceName}")
+                        closeUsbPort()
                     }
                 }
             }
@@ -137,7 +108,6 @@ class MainActivity : ComponentActivity() {
         receivedData = mutableStateOf("N/A")
 
         enableEdgeToEdge()
-
         setContent {
             ControllerTheme {
                 Scaffold(
@@ -159,128 +129,114 @@ class MainActivity : ComponentActivity() {
         }
 
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-        val filter = IntentFilter().apply {
-            addAction(ACTION_USB_PERMISSION)
-            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-        }
+
+        // 切断イベントのみを動的にリッスンする
+        val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(usbDetachReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(usbReceiver, filter)
+            registerReceiver(usbDetachReceiver, filter)
         }
 
-        checkConnectedUsbDevices()
+        // 各種ループ処理を開始
         startInputProcessingLoop()
         startSerialSendLoop()
         startReadLoop()
+
+        // Activityの起動元となったIntentを処理する
+        handleIntent(intent)
     }
 
-    private fun queueSerialData(data: String) {
-        dataQueue.clear()
-        dataQueue.offer(data)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Log.d("MainActivity", "onNewIntent received: ${intent.action}")
+        // Activityが既に起動中に新しいIntentを受け取った場合の処理
+        handleIntent(intent)
     }
 
-    private fun actualSendSerial(data: String) {
-        if (usbSerialPort == null || usbSerialPort?.isOpen == false) {
+    private fun handleIntent(intent: Intent?) {
+        val device: UsbDevice? = when (intent?.action) {
+            // マニフェスト経由で ATTACHED イベントを受け取った場合
+            UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                statusMessage.value = "USBデバイスを検知"
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+            }
+            // UsbPermissionReceiver経由で許可結果を受け取った場合
+            ACTION_USB_PERMISSION_GRANTED -> {
+                statusMessage.value = "USB権限を許可されました"
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+            }
+            else -> null
+        }
+
+        device?.let {
+            // 見つかったデバイスへの接続を試みる
+            connectToDevice(it)
+        } ?: run {
+            // アプリがランチャーから通常起動された場合、接続済みのデバイスを探す
+            if (intent?.action == Intent.ACTION_MAIN) {
+                findAndConnectToDevice()
+            }
+        }
+    }
+
+    private fun connectToDevice(device: UsbDevice) {
+        if (UsbSerialProber.getDefaultProber().probeDevice(device) == null) {
+            statusMessage.value = "互換性のないUSBデバイスです"
             return
         }
-        try {
-            usbSerialPort?.write((data + "\n").toByteArray(StandardCharsets.UTF_8), 200)
-            Handler(Looper.getMainLooper()).post {
-                sentDataForUi.value = data
-            }
-        } catch (e: Exception) {
-            Handler(Looper.getMainLooper()).post {
-                statusMessage.value = "送信エラー: ${e.message}"
-            }
-            Log.e("ActualSerialSend", "Error sending data", e)
+
+        if (usbManager?.hasPermission(device) == true) {
+            Log.i("MainActivity", "Permission already exists. Opening device: ${device.deviceName}")
+            openUsbDevice(device)
+        } else {
+            Log.i("MainActivity", "Requesting permission for device: ${device.deviceName}")
+            statusMessage.value = "USB権限を要求中..."
+            requestUsbPermission(device)
+        }
+    }
+
+    private fun findAndConnectToDevice() {
+        val deviceList = usbManager?.deviceList ?: return
+        val prober = UsbSerialProber.getDefaultProber()
+        val serialDevice = deviceList.values.find { prober.probeDevice(it) != null }
+        serialDevice?.let {
+            Log.i("MainActivity", "Found connected device on startup. Trying to connect.")
+            connectToDevice(it)
+        } ?: run {
+            statusMessage.value = "対応デバイスが見つかりません"
         }
     }
 
     private fun requestUsbPermission(device: UsbDevice) {
-        Log.d("USBRequest", "Requesting permission for ${device.deviceName}")
         val intentFlags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
 
-        // 【修正済み】Intentを明示的にする
         val intent = Intent(ACTION_USB_PERMISSION).apply {
-            `package` = this@MainActivity.packageName
+            // 送信先をUsbPermissionReceiverクラスに明示的に指定
+            setClass(this@MainActivity, UsbPermissionReceiver::class.java)
         }
 
         val permissionIntent = PendingIntent.getBroadcast(this, 0, intent, intentFlags)
         usbManager!!.requestPermission(device, permissionIntent)
     }
 
-    private fun checkConnectedUsbDevices() {
-        val deviceList = usbManager?.deviceList
-        if (deviceList.isNullOrEmpty()) {
-            statusMessage.value = "USBデバイスが見つかりません"
-            return
-        }
-        var foundSerialDevice = false
-        deviceList.values.forEach { device ->
-            val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
-            if (driver != null) {
-                if (usbManager!!.hasPermission(device)) {
-                    openUsbDevice(device)
-                } else {
-                    requestUsbPermission(device)
-                }
-                foundSerialDevice = true
-                return@forEach
-            }
-        }
-        if (!foundSerialDevice && (usbSerialPort == null || usbSerialPort?.isOpen == false)) {
-            statusMessage.value = "互換性のあるUSBシリアルデバイスが見つかりません"
-        }
-    }
-
-    private fun openUsbDevice(device: UsbDevice) {
-        if (usbSerialPort != null && usbSerialPort!!.isOpen) {
-            if (usbSerialPort?.device?.deviceId == device.deviceId) return
-            closeUsbPort()
-        }
-        val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
-        if (driver == null || driver.ports.isEmpty()) {
-            statusMessage.value = "USBシリアルドライバ/ポートが見つかりません (${device.deviceName})"
-            return
-        }
-        usbSerialPort = driver.ports[0]
-        val connection = usbManager?.openDevice(driver.device)
-        if (connection == null) {
-            statusMessage.value = "USBデバイスを開けません (${device.deviceName})"
-            if (usbManager?.hasPermission(device) == false) requestUsbPermission(device)
-            return
-        }
-        try {
-            usbSerialPort?.open(connection)
-            usbSerialPort?.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
-            statusMessage.value = "USBシリアル接続成功: ${device.productName ?: device.deviceName}"
-        } catch (e: Exception) {
-            statusMessage.value = "USBシリアルオープンエラー: ${e.message}"
-            Log.e("USBSerial", "Error opening port", e)
-            closeUsbPort()
-        }
-    }
-
-    private fun closeUsbPort() {
-        try {
-            usbSerialPort?.close()
-        } catch (e: Exception) {
-            Log.e("USBSerial", "Port close error", e)
-        }
-        usbSerialPort = null
-        if (statusMessage.value.startsWith("USBシリアル接続成功")) {
-            statusMessage.value = "USB接続待機中..."
-        }
-    }
-
     override fun onDestroy() {
         super.onDestroy()
+        unregisterReceiver(usbDetachReceiver)
         inputHandler.removeCallbacksAndMessages(null)
         serialSendExecutor?.shutdownNow()
         readThread?.quitSafely()
@@ -288,8 +244,58 @@ class MainActivity : ComponentActivity() {
             readThread?.join(500)
         } catch (e: InterruptedException) { /*Ignore*/ }
         closeUsbPort()
-        unregisterReceiver(usbReceiver)
     }
+
+    private fun openUsbDevice(device: UsbDevice) {
+        if (usbSerialPort != null && usbSerialPort!!.isOpen) {
+            if (usbSerialPort?.device?.deviceId == device.deviceId) {
+                statusMessage.value = "すでに接続済みです: ${device.productName}"
+                return
+            }
+            closeUsbPort()
+        }
+        val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
+        if (driver == null || driver.ports.isEmpty()) {
+            statusMessage.value = "USBシリアルドライバが見つかりません"
+            return
+        }
+        val port = driver.ports[0]
+        val connection = usbManager?.openDevice(driver.device)
+        if (connection == null) {
+            statusMessage.value = "USBデバイスを開けません（権限なし？）"
+            return
+        }
+        try {
+            port.open(connection)
+            port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            usbSerialPort = port
+            statusMessage.value = "USB接続成功: ${device.productName ?: device.deviceName}"
+            Log.i("MainActivity", "Serial port opened successfully.")
+        } catch (e: Exception) {
+            statusMessage.value = "USBシリアルオープンエラー: ${e.message}"
+            Log.e("USBSerial", "Error opening serial port", e)
+            closeUsbPort()
+        }
+    }
+
+    private fun closeUsbPort() {
+        if (usbSerialPort?.isOpen == true) {
+            try {
+                usbSerialPort?.close()
+            } catch (e: Exception) {
+                Log.e("USBSerial", "Error closing port", e)
+            }
+        }
+        usbSerialPort = null
+        runOnUiThread {
+            if (!statusMessage.value.contains("切断")) {
+                statusMessage.value = "USB接続が切断されました"
+            }
+        }
+    }
+
+    // --- Controller Input and Serial Communication ---
+    // (以下のメソッド群は変更ありません)
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         if (event.isFromSource(InputDevice.SOURCE_JOYSTICK) || event.isFromSource(InputDevice.SOURCE_GAMEPAD) || event.isFromSource(InputDevice.SOURCE_DPAD)) {
@@ -334,6 +340,28 @@ class MainActivity : ComponentActivity() {
             return true
         }
         return super.onKeyUp(keyCode, event)
+    }
+
+    private fun queueSerialData(data: String) {
+        dataQueue.clear()
+        dataQueue.offer(data)
+    }
+
+    private fun actualSendSerial(data: String) {
+        if (usbSerialPort == null || usbSerialPort?.isOpen == false) {
+            return
+        }
+        try {
+            usbSerialPort?.write((data + "\n").toByteArray(StandardCharsets.UTF_8), 200)
+            Handler(Looper.getMainLooper()).post {
+                sentDataForUi.value = data
+            }
+        } catch (e: Exception) {
+            Handler(Looper.getMainLooper()).post {
+                statusMessage.value = "送信エラー: ${e.message}"
+            }
+            Log.e("ActualSerialSend", "Error sending data", e)
+        }
     }
 
     private fun startInputProcessingLoop() {
@@ -421,7 +449,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+
 // --- Composable UI Functions ---
+// (UI関連のコードは一切変更ありません)
 @Composable
 fun ControllerScreen(
     modifier: Modifier = Modifier,
